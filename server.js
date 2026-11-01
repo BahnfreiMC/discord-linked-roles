@@ -34,7 +34,22 @@ app.get("/callback",async(req,res)=>{
   if(!stored || state!==stored || parts.length!==3 || !/^\d+$/.test(parts[1]) || Math.abs(Date.now()-Number(parts[1]))>600000 || !crypto.timingSafeEqual(Buffer.from(parts[2],"hex"),Buffer.from(sign(parts[0]+"."+parts[1]),"hex"))) return res.status(403).send(page("Ungültige oder abgelaufene Anmeldung."));
   if(typeof req.query.code!=="string") return res.status(400).send(page("Anmeldung abgebrochen."));
   const tokenRes=await fetch("https://discord.com/api/oauth2/token",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:new URLSearchParams({client_id:clientId,client_secret:clientSecret,grant_type:"authorization_code",code:req.query.code,redirect_uri:redirectUri})});
-  if(!tokenRes.ok)throw Error("Token exchange failed: "+tokenRes.status);
+  if(!tokenRes.ok){
+    const retryAfter=tokenRes.headers.get("retry-after");
+    const rateResetAfter=tokenRes.headers.get("x-ratelimit-reset-after");
+    const rateScope=tokenRes.headers.get("x-ratelimit-scope");
+    const requestId=tokenRes.headers.get("x-discord-request-id") || tokenRes.headers.get("cf-ray");
+    // Do not log response bodies: OAuth responses may contain sensitive values.
+    console.error("Discord OAuth token exchange diagnostic", {
+      status:tokenRes.status,
+      statusText:tokenRes.statusText,
+      retryAfter:retryAfter || "not provided",
+      rateLimitResetAfter:rateResetAfter || "not provided",
+      rateLimitScope:rateScope || "not provided",
+      requestId:requestId || "not provided"
+    });
+    throw Error("Token exchange failed: "+tokenRes.status);
+  }
   const {access_token:accessToken}=await tokenRes.json();
   const auth={Authorization:"Bearer "+accessToken};
   const userRes=await fetch(api+"/users/@me",{headers:auth});
