@@ -24,6 +24,24 @@ app.get("/login",(_req,res)=>{
  res.redirect("https://discord.com/oauth2/authorize?"+q);
 });
 function cookie(req,key){const c=(req.headers.cookie||"").split(";").map(s=>s.trim()).find(s=>s.startsWith(key+"="));return c?decodeURIComponent(c.slice(key.length+1)):"";}
+// Process-local cooldown; a restart cannot clear a restriction enforced by Discord.
+let tokenCooldownUntil = 0;
+const consumedCodes = new Map();
+function pruneCodes() {
+ const now=Date.now();
+ for(const [key,expires] of consumedCodes) if(expires<=now) consumedCodes.delete(key);
+}
+function waitMessage() {
+ const minutes=Math.ceil(Math.max(0,tokenCooldownUntil-Date.now())/60000);
+ return "Discord begrenzt derzeit die Anmeldung. Bitte versuche es in etwa "+minutes+" Minute(n) erneut.";
+}
+function retryDelayMs(value) {
+ if(!value) return 60000;
+ const seconds=Number(value);
+ if(Number.isFinite(seconds) && seconds>=0) return Math.min(Math.ceil(seconds*1000),86400000);
+ const timestamp=Date.parse(value);
+ return Number.isFinite(timestamp) ? Math.min(Math.max(0,timestamp-Date.now()),86400000) : 60000;
+}
 function eligible(key,id){const allowed=(process.env[key+"_IDS"]||"").split(",").map(x=>x.trim()).filter(Boolean);return allowed.includes(id)?1:0;}
 app.get("/callback",async(req,res)=>{
  try{
@@ -33,9 +51,15 @@ app.get("/callback",async(req,res)=>{
   const parts=state.split(".");
   if(!stored || state!==stored || parts.length!==3 || !/^\d+$/.test(parts[1]) || Math.abs(Date.now()-Number(parts[1]))>600000 || !crypto.timingSafeEqual(Buffer.from(parts[2],"hex"),Buffer.from(sign(parts[0]+"."+parts[1]),"hex"))) return res.status(403).send(page("Ungültige oder abgelaufene Anmeldung."));
   if(typeof req.query.code!=="string") return res.status(400).send(page("Anmeldung abgebrochen."));
+  if(Date.now()<tokenCooldownUntil) return res.status(429).type("html").send(page(waitMessage()));
+  pruneCodes();
+  const codeKey=crypto.createHash("sha256").update(req.query.code).digest("hex");
+  if(consumedCodes.has(codeKey)) return res.status(400).type("html").send(page("Dieser Anmeldelink wurde bereits verwendet. Bitte starte eine neue Anmeldung."));
+  consumedCodes.set(codeKey,Date.now()+600000);
   const tokenRes=await fetch("https://discord.com/api/oauth2/token",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:new URLSearchParams({client_id:clientId,client_secret:clientSecret,grant_type:"authorization_code",code:req.query.code,redirect_uri:redirectUri})});
   if(!tokenRes.ok){
     const retryAfter=tokenRes.headers.get("retry-after");
+    if(tokenRes.status===429) tokenCooldownUntil=Math.max(tokenCooldownUntil,Date.now()+retryDelayMs(retryAfter));
     const rateResetAfter=tokenRes.headers.get("x-ratelimit-reset-after");
     const rateScope=tokenRes.headers.get("x-ratelimit-scope");
     const requestId=tokenRes.headers.get("x-discord-request-id") || tokenRes.headers.get("cf-ray");
@@ -48,6 +72,7 @@ app.get("/callback",async(req,res)=>{
       rateLimitScope:rateScope || "not provided",
       requestId:requestId || "not provided"
     });
+    if(tokenRes.status===429) return res.status(429).type("html").send(page(waitMessage()));
     throw Error("Token exchange failed: "+tokenRes.status);
   }
   const {access_token:accessToken}=await tokenRes.json();
