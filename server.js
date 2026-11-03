@@ -86,4 +86,12 @@ app.get("/callback",async(req,res)=>{
   res.type("html").send(page("Verifizierung erfolgreich. Du kannst zurück zu Discord wechseln und deine verknüpften Rollen auswählen."));
  }catch(err){console.error(err);res.status(500).type("html").send(page("Verifizierung fehlgeschlagen. Prüfe die Server-Logs und die Discord-Konfiguration."));}
 });
+// Register Discord's linked-role criteria when a bot token is configured.
+// The web service must stay available even if Discord's API is temporarily unavailable.
+const {registerMetadata} = require("./register");
+if (process.env.DISCORD_BOT_TOKEN) {
+ registerMetadata().catch(error => console.error("Linked Roles setup:", error.message));
+} else {
+ console.warn("Linked Roles metadata not registered: set DISCORD_BOT_TOKEN in Render environment variables.");
+}
 app.listen(process.env.PORT||3000,"0.0.0.0",()=>console.log("Web server ready"));
